@@ -117,9 +117,9 @@ Examples:
     
     # Setup launcher configuration
     launcher_config = LauncherConfig(
-        child_executor_name="mpi", 
-        task_executor_name="multiprocessing", 
-        comm_name="zmq", 
+        child_executor_name="async_mpi", 
+        task_executor_name="async_processpool", 
+        comm_name="async_zmq", 
         worker_logs=True, 
         master_logs=True, 
         log_level=logging.INFO

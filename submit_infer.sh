@@ -13,4 +13,4 @@ export ZE_FLAT_DEVICE_HIERARCHY=FLAT
 
 source ~/.vllm_envs/inference/bin/activate
 
-el "ensemble_config.json" --system-config-file "system_config.json" --launcher-config-file "launcher_config.json"
+el "ensemble_config.json" --system-config-file "system_config.json" --launcher-config-file "launcher_config.json" --async-orchestrator
