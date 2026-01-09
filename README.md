@@ -188,26 +188,6 @@ Ensemble launcher configuration using MPI for child processes and multiprocessin
    - Logs timing and results
 5. **Analysis**: Review logs for throughput and latency metrics
 
-## Tips
-
-**GPU Configuration:**
-- Single GPU: Automatic configuration
-- Multi-GPU: Uses `--distributed-executor-backend mp` with tensor parallelism
-
-**Model Caching:**
-- First run downloads models (requires proxy settings)
-- Subsequent runs use cached models with `HF_HUB_OFFLINE=1`
-
-**Debugging:**
-- Check server logs for vLLM startup issues
-- Check client logs for connection and inference errors
-- Use `VLLM_LOGGING_LEVEL=DEBUG` for detailed output
-
-**Resource Management:**
-- Each instance uses dedicated GPUs via `ZE_AFFINITY_MASK`
-- Unique ports prevent conflicts between instances
-- Separate temp directories isolate each instance
-
 ## Example Output
 
 Client log summary:
@@ -219,26 +199,3 @@ Client log summary:
 [2026-01-08 14:23:45]   Total time: 245.32s
 [2026-01-08 14:23:45]   Average time per prompt: 2.45s
 ```
-
-## Troubleshooting
-
-**vLLM server won't start:**
-- Check GPU availability with `sycl-ls`
-- Verify model is cached or proxy is set
-- Check `ZE_AFFINITY_MASK` is correct
-
-**Client connection timeout:**
-- Verify server log shows "Application startup complete"
-- Check port is not in use
-- Ensure `no_proxy` is set correctly
-
-**Out of memory:**
-- Reduce `--ngpus` per instance
-- Use smaller model
-- Check GPU memory with `xpu-smi`
-
-## References
-
-- [vLLM Documentation](https://docs.vllm.ai/)
-- [Aurora Documentation](https://docs.alcf.anl.gov/aurora/)
-- [Ensemble Launcher](https://github.com/argonne-lcf/ensemble_launcher)
