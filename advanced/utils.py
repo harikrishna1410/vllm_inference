@@ -112,9 +112,10 @@ def wait_for_vllm(args_dict: Args, timeout_seconds=3600, check_interval=10):
     while time.time() - start_time < timeout_seconds:
         try:
             response = submit_prompt("Hi", args_dict)
+            logger.info(f"wait_for_vllm: Got response {response}")
             return response
         except Exception as e:
-            logger.info(f"Getting response failed with error {e}")
+            logger.info(f"wait_for_vllm: Getting response failed with error {e}")
             pass
         time.sleep(check_interval)
     raise RuntimeError(f"vLLM not ready yet after {timeout_seconds}")
