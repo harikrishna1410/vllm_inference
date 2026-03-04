@@ -1,5 +1,5 @@
 #!/bin/bash
-# Usage: ./infer_no_ray.sh IDX PORT NGPUS [VLLM_MODEL] [CACHE_DIR] [TEMPDIR] [NUM_PROMPTS]
+# Usage: ./infer_no_ray.sh IDX PORT NGPUS [VLLM_MODEL] [CACHE_DIR] [TEMPDIR] [BACKEND]
 #
 # Required Arguments:
 #   IDX          - Job index/identifier
@@ -10,7 +10,7 @@
 #   VLLM_MODEL   - Model name (default: meta-llama/Llama-3.1-8B-Instruct)
 #   CACHE_DIR    - HuggingFace cache directory (default: $(pwd)/.cache)
 #   TEMPDIR      - Temporary directory (default: /tmp)
-#   NUM_PROMPTS  - Number of prompts to send (default: 1)
+#   BACKEND  - Number of prompts to send (default: 1)
 #
 # Examples:
 #   ./infer_no_ray.sh 1 8000 8                     # IDX=1, PORT=8000, 8 GPUs
@@ -24,7 +24,7 @@ echo "SCRIPT_DIR: '$SCRIPT_DIR'"
 # Check required arguments
 if [ $# -lt 3 ]; then
     echo "ERROR: Missing required arguments"
-    echo "Usage: $0 IDX PORT NGPUS [VLLM_MODEL] [CACHE_DIR] [TEMPDIR] [NUM_PROMPTS]"
+    echo "Usage: $0 IDX PORT NGPUS [VLLM_MODEL] [CACHE_DIR] [TEMPDIR] [BACKEND]"
     echo ""
     echo "Required arguments:"
     echo "  IDX          - Job index/identifier"
@@ -42,7 +42,7 @@ NGPUS=${3}
 VLLM_MODEL=${4:-"meta-llama/Llama-3.1-8B-Instruct"}
 CACHE_DIR=${5:-"$(pwd)/.cache"}
 TEMPDIR=${6:-"/tmp"}
-NUM_PROMPTS=${7:-1}
+BACKEND=${7:-1}
 
 echo "IDX:$IDX"
 echo "PORT:$PORT"
@@ -50,7 +50,7 @@ echo "NGPUS:$NGPUS"
 echo "VLLM_MODEL:$VLLM_MODEL"
 echo "CACHE_DIR:$CACHE_DIR"
 echo "TEMPDIR:$TEMPDIR"
-echo "NUM_PROMPTS:$NUM_PROMPTS"
+echo "BACKEND:$BACKEND"
 echo "ZE_AFFINITY_MASK: $ZE_AFFINITY_MASK"
 
 if [ ! -d "${CACHE_DIR}" ]; then

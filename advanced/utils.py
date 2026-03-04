@@ -1,7 +1,18 @@
 import argparse
+import logging
+import os
 from typing import TypedDict
 
-from ensemble_launcher.logging import setup_logger
+
+def get_logger(name, log_dir):
+    os.makedirs(log_dir, exist_ok=True)
+    logger = logging.getLogger(name)
+    if not logger.handlers:
+        logger.setLevel(logging.INFO)
+        fh = logging.FileHandler(os.path.join(log_dir, f"{name}.log"))
+        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logger.addHandler(fh)
+    return logger
 
 
 class Args(TypedDict):
@@ -13,6 +24,7 @@ class Args(TypedDict):
     cache_dir: str
     tmp_dir: str
     ngpus_per_model: int
+    mode: str
 
 
 def parse_args():
@@ -61,6 +73,13 @@ def parse_args():
         default=8,
         help="Number of prompts to send (default: 1)",
     )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="wait",
+        choices=["wait", "submit"],
+        help="decide the mode to launch ",
+    )
 
     args = parser.parse_args()
     args_dict = Args(**(vars(args)))
@@ -106,7 +125,7 @@ def wait_for_vllm(args_dict: Args, timeout_seconds=3600, check_interval=10):
     import time
 
     start_time = time.time()
-    logger = setup_logger(
+    logger = get_logger(
         __name__ + f"_{socket.gethostname()}", log_dir=f"{os.getcwd()}/logs"
     )
     while time.time() - start_time < timeout_seconds:
@@ -123,6 +142,9 @@ def wait_for_vllm(args_dict: Args, timeout_seconds=3600, check_interval=10):
 
 if __name__ == "__main__":
     args_dict = parse_args()
-    wait_for_vllm(args_dict)
-    # response = submit_prompt("Hi", args_dict)
-    # print(response.model_dump()["choices"][0]["message"]["content"])
+    if args_dict["mode"] == "wait":
+        wait_for_vllm(args_dict)
+    elif args_dict["mode"] == "submit":
+        submit_prompt("hi", args_dict)
+    else:
+        raise RuntimeError(f"Unknown mode {args_dict['mode']}")
