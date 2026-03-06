@@ -1,5 +1,6 @@
 import concurrent.futures
 import os
+import random
 import time
 import uuid
 from typing import List
@@ -11,11 +12,12 @@ from ensemble_launcher.helper_functions import get_nodes
 from ensemble_launcher.orchestrator import ClusterClient
 from utils import get_logger, parse_args, submit_prompt, wait_for_vllm
 
-logger = get_logger("main_el", log_dir=f"{os.getcwd()}/script_logs")
+logger = get_logger("main_multi_node", log_dir=f"{os.getcwd()}/script_logs")
+
+UTILS_PY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "utils.py")
 
 
 def create_prompt(nprompts) -> List[str]:
-    # Send prompts
     prompt = "Hi, can you introduce yourself?"
     return [prompt for i in range(nprompts)]
 
@@ -25,19 +27,22 @@ def main():
     logger.info("main started")
 
     args_dict = parse_args()
+    nodes = get_nodes()
+    nnodes = len(nodes)
+    logger.info("running on %d nodes: %s", nnodes, nodes)
 
-    # Setup the vllm servers 1 per node
+    # Setup EnsembleLauncher
     cpus = list(range(104))
     cpus.pop(52)
     cpus.pop(0)
     sys_config = SystemConfig(
         name="aurora", ncpus=102, ngpus=12, cpus=cpus, gpus=list(range(12))
     )
-    launcer_config = LauncherConfig(
+    launcher_config = LauncherConfig(
         child_executor_name="async_mpi",
         task_executor_name=["async_processpool", "async_mpi"],
         nlevels=1,
-        nchildren=len(get_nodes()),
+        nchildren=nnodes,
         cluster=True,
         worker_logs=True,
         master_logs=True,
@@ -47,9 +52,8 @@ def main():
         report_interval=10.0,
     )
 
-    # No initial tasks
     el = EnsembleLauncher(
-        ensemble_file={}, system_config=sys_config, launcher_config=launcer_config
+        ensemble_file={}, system_config=sys_config, launcher_config=launcher_config
     )
 
     t0 = time.time()
@@ -58,7 +62,6 @@ def main():
     time.sleep(5.0)
     logger.info("EnsembleLauncher ready (%.1fs)", time.time() - t0)
 
-    ##preprocessing
     model_dir = os.path.join(
         args_dict["cache_dir"],
         "hub",
@@ -71,13 +74,18 @@ def main():
         f"models--{args_dict['model'].replace('/', '--')}",
     )
     cache_dir = local_cache
+
+    ngpus = args_dict["ngpus_per_model"]
+    master_addr = nodes[0]
+    master_port = random.randint(20000, 30000)
+
     vllm_start_futures = []
-    with ClusterClient(checkpoint_dir=launcer_config.checkpoint_dir) as client:
+    with ClusterClient(checkpoint_dir=launcher_config.checkpoint_dir) as client:
         if not os.path.exists(copy_dir):
             t0 = time.time()
-            logger.info("mkdir on %d nodes", len(get_nodes()))
+            logger.info("mkdir on %d nodes", nnodes)
             copy_futures = []
-            for node in get_nodes():
+            for node in nodes:
                 future = client.submit(f"mkdir -p {copy_dir}", nnodes=1, ppn=1)
                 copy_futures.append(future)
 
@@ -87,12 +95,12 @@ def main():
             t0 = time.time()
             logger.info(
                 "dsync model to local cache on %d nodes: %s -> %s",
-                len(get_nodes()),
+                nnodes,
                 model_dir,
                 copy_dir,
             )
             copy_futures = []
-            for node in get_nodes():
+            for node in nodes:
                 task = Task(
                     task_id=str(uuid.uuid4()),
                     nnodes=1,
@@ -111,56 +119,81 @@ def main():
             else:
                 raise RuntimeError("Copying models failed")
 
-        ##Start one vllm server per node
+        # Start NGPUS engine processes per node, one per GPU
         t0 = time.time()
         logger.info(
-            "starting vllm servers on %d nodes (port=%s, ngpus=%d)",
-            len(get_nodes()),
+            "starting vllm engines on %d nodes (%d procs/node, port=%s, master=%s:%d)",
+            nnodes,
+            ngpus,
             args_dict["port"],
-            args_dict["ngpus_per_model"],
+            master_addr,
+            master_port,
         )
-        for vllm_idx in range(len(get_nodes())):
-            vllm_start_futures.append(
-                client.submit(
-                    f"{os.getcwd()}/start_vllm_server.sh {vllm_idx} {args_dict['port']} {args_dict['ngpus_per_model']} {args_dict['model']} {cache_dir} {args_dict['tmp_dir']}",
-                    ppn=args_dict["ngpus_per_model"],
-                    ngpus_per_process=1,
-                )
+        for idx in range(nnodes):
+            env = {
+                "MASTER_ADDR": f"{master_addr}",
+                "MASTER_PORT": f"{master_port}",
+                "WORLD_SIZE": f"{nnodes * ngpus} ",
+                "RANK_OFFSET": f"{idx * ngpus} ",
+                "NNODES": f"{nnodes}",
+            }
+            cmd = (
+                f"{os.getcwd()}/start_vllm_engine.sh "
+                f"{idx} {args_dict['port']} {ngpus} "
+                f"{args_dict['model']} {cache_dir} {args_dict['tmp_dir']}"
             )
-
-        ##Wait for them to finish
-        vllm_wait_futures = []
-        for i in range(len(get_nodes())):
-            vllm_wait_futures.append(client.submit(wait_for_vllm, args_dict))
-
-        concurrent.futures.wait(vllm_wait_futures)
-        exceptions = [fut.exception() for fut in vllm_wait_futures]
-
-        if all([e is None for e in exceptions]):
-            logger.info("all vllm servers ready (%.1fs since launch)", time.time() - t0)
-
-            prompts = create_prompt(args_dict["num_prompts"]) * len(get_nodes())
-            logger.info("submitting %d prompts", len(prompts))
-            t_prompts = time.time()
-
-            prompt_futures = client.map(
-                submit_prompt,
-                zip(prompts, [args_dict] * args_dict["num_prompts"] * len(get_nodes())),
+            task = Task(
+                task_id=str(uuid.uuid4()),
+                nnodes=1,
+                ppn=ngpus,
+                ngpus_per_process=1,
+                executable=cmd,
+                executor_name="async_mpi",
+                env=env,
             )
-            results = []
-            for fut in concurrent.futures.as_completed(prompt_futures):
-                result = fut.result()
-                e = fut.exception()
-                logger.info("prompt done: result=%s exception=%s", result, e)
-                results.append(result)
+            vllm_start_futures.append(client.submit(task=task))
+            logger.info("vllm engines submitted for node index %d", idx)
 
-            logger.info("all prompts done (%.1fs)", time.time() - t_prompts)
+        # Wait for vllm engine to be ready via MPI (mirrors the no-EL mpirun wait)
+        wait_task = Task(
+            task_id=str(uuid.uuid4()),
+            nnodes=1,
+            ppn=ngpus,
+            executable=(
+                f"python {UTILS_PY} --mode wait "
+                f"--port {args_dict['port']} "
+                f"--model {args_dict['model']} "
+                f"--key {args_dict['key']}"
+            ),
+            executor_name="async_mpi",
+        )
+        wait_future = client.submit(task=wait_task)
+        concurrent.futures.wait([wait_future])
+        if wait_future.exception() is not None:
+            raise RuntimeError(f"vllm wait failed: {wait_future.exception()}")
+        logger.info("vllm engine ready (%.1fs since launch)", time.time() - t0)
 
-        # stop the vllm servers
+        # prompts = create_prompt(args_dict["num_prompts"])
+        # logger.info("submitting %d prompts", len(prompts))
+        # t_prompts = time.time()
+
+        # prompt_futures = client.map(
+        #     submit_prompt, zip(prompts, [args_dict] * args_dict["num_prompts"])
+        # )
+        # results = []
+        # for fut in concurrent.futures.as_completed(prompt_futures):
+        #     result = fut.result()
+        #     e = fut.exception()
+        #     logger.info("prompt done: result=%s exception=%s", result, e)
+        #     results.append(result)
+
+        # logger.info("all prompts done (%.1fs)", time.time() - t_prompts)
+
+        # Stop the vllm engines
         t0 = time.time()
-        logger.info("stopping vllm servers")
+        logger.info("stopping vllm engines")
         stop_futures = []
-        for vllm_idx in range(len(get_nodes())):
+        for idx in range(nnodes):
             task = Task(
                 task_id=str(uuid.uuid4()),
                 nnodes=1,
@@ -170,10 +203,10 @@ def main():
             )
             stop_futures.append(client.submit(task))
 
-        concurrent.futures.wait(stop_futures, timeout=30)
-        logger.info("vllm servers stopped (%.1fs)", time.time() - t0)
+        concurrent.futures.wait(stop_futures)
+        logger.info("vllm engines stopped (%.1fs)", time.time() - t0)
 
-    # stop the cluster
+    # Stop the cluster
     t0 = time.time()
     logger.info("stopping EnsembleLauncher")
     el.stop()
