@@ -32,7 +32,7 @@ class Args(TypedDict):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="vLLM client for sending inference prompts."
+        description="EL inference with vLLM"
     )
     parser.add_argument(
         "--model",
@@ -73,8 +73,8 @@ def parse_args():
     parser.add_argument(
         "--ngpus-per-model",
         type=int,
-        default=8,
-        help="Number of prompts to send (default: 1)",
+        default=1,
+        help="Number of GPUs per model, equal to the tensor parallel size (default: 1)",
     )
     parser.add_argument(
         "--mode",
@@ -89,6 +89,18 @@ def parse_args():
         default="mpi",
         choices=["mpi", "ssh"],
         help="method to launch vllm servers on multi-node (default: mpi)",
+    )
+    parser.add_argument(
+        "--num-gpus_per_node",
+        type=int,
+        default=12,
+        help="Number of GPUs per node (default: 12 as on Aurora)",
+    )
+    parser.add_argument(
+        "--num-cpus_per_node",
+        type=int,
+        default=104,
+        help="Number of CPUs per node (default: 104 as on Aurora)",
     )
 
     args = parser.parse_args()
