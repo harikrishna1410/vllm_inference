@@ -211,3 +211,5 @@ __marimo__/
 
 # EL outputs
 ckpt_*/
+*.o*
+main_status.json

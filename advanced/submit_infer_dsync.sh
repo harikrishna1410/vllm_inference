@@ -1,12 +1,14 @@
 #!/bin/bash -l
-##PBS -N el-vllm
-##PBS -l select=2
-##PBS -l walltime=01:00:00
-##PBS -q debug-scaling
-##PBS -A datascience
-##PBS -l filesystems=home:flare
-##PBS -j oe
-#cd $PBS_O_WORKDIR
+#PBS -N el-vllm
+#PBS -l select=2
+#PBS -l walltime=01:00:00
+#PBS -q debug-scaling
+#PBS -A datascience
+#PBS -l filesystems=home:flare
+#PBS -j oe
+cd $PBS_O_WORKDIR
+
+echo "$(date) Started submit_infer_dsync.sh"
 
 # Load frameworks module
 module load frameworks
