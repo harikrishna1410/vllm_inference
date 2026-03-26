@@ -8,7 +8,7 @@ import sys
 from datetime import datetime
 
 from ensemble_launcher import EnsembleLauncher
-from ensemble_launcher.config import LauncherConfig, SystemConfig
+from ensemble_launcher.config import LauncherConfig, SystemConfig, PolicyConfig
 from ensemble_launcher.ensemble import Task
 from ensemble_launcher.helper_functions import get_nodes
 from ensemble_launcher.orchestrator import ClusterClient
@@ -46,11 +46,24 @@ def main():
         cpus=cpus, 
         gpus=list(range(args_dict["num_gpus_per_node"]))
     )
+    #launcer_config = LauncherConfig(
+    #    child_executor_name="async_mpi",
+    #    task_executor_name=["async_processpool", "async_mpi"],
+    #    nlevels=1,
+    #    nchildren=len(get_nodes()),
+    #    cluster=True,
+    #    worker_logs=True,
+    #    master_logs=True,
+    #    return_stdout=True,
+    #    children_scheduler_policy="simple_split_children_policy",
+    #    checkpoint_dir=f"{os.getcwd()}/ckpt_{str(uuid.uuid4())}",
+    #    report_interval=10.0,
+    #    results_flush_interval=0.5,
+    #)
     launcer_config = LauncherConfig(
         child_executor_name="async_mpi",
         task_executor_name=["async_processpool", "async_mpi"],
-        nlevels=1,
-        nchildren=len(get_nodes()),
+        policy_config=PolicyConfig(nlevels=1, nchildren=len(get_nodes())),
         cluster=True,
         worker_logs=True,
         master_logs=True,
@@ -58,6 +71,7 @@ def main():
         children_scheduler_policy="simple_split_children_policy",
         checkpoint_dir=f"{os.getcwd()}/ckpt_{str(uuid.uuid4())}",
         report_interval=10.0,
+        results_flush_interval=0.5,
     )
 
     # No initial tasks
@@ -99,7 +113,7 @@ def main():
     )
     cache_dir = local_cache
     vllm_start_futures = []
-    with ClusterClient(checkpoint_dir=launcer_config.checkpoint_dir) as client:
+    with ClusterClient(checkpoint_dir=launcer_config.checkpoint_dir, n_workers=4) as client:
         # Start ONE vllm server per node
         t0 = time.time()
         logger.info(
@@ -113,22 +127,27 @@ def main():
             vllm_start_futures.append(
                 client.submit(
                     f"{os.getcwd()}/start_vllm_server_dsync.sh {vllm_idx} {args_dict['port']} {args_dict['ngpus_per_model']} {args_dict['model']} {cache_dir} {args_dict['tmp_dir']}",
-                    ppn=args_dict["ngpus_per_model"],
-                    ngpus_per_process=1,
+                    ppn=1, # NB limited to 1 CPU core per task
+                    ngpus_per_process=1, # NB equal to TP size
                 )
             )
 
         ##Wait for them to finish
+        print_with_timestamp(f"Waiting for vllm servers to be ready ... (time: {time.time() - t_start} seconds)")
         vllm_wait_futures = []
         for i in range(len(get_nodes())):
-            vllm_wait_futures.append(client.submit(wait_for_vllm, args_dict))
+            vllm_wait_futures.append(
+                client.submit(wait_for_vllm, args_dict, check_interval=1)
+            )
 
         concurrent.futures.wait(vllm_wait_futures)
         exceptions = [fut.exception() for fut in vllm_wait_futures]
+        print_with_timestamp(f"Vllm servers ready! (time: {time.time() - t_start} seconds)")
 
         # Submit prompts
         if all([e is None for e in exceptions]):
             logger.info("all vllm servers ready (%.1fs since launch)", time.time() - t0)
+            print_with_timestamp(f"All vllm servers ready! (time: {time.time() - t0} seconds)")
 
             #prompts = create_prompt(args_dict["num_prompts"]) * len(get_nodes())
             prompts = prompts * len(get_nodes())
@@ -146,9 +165,11 @@ def main():
                 e = fut.exception()
                 logger.info("prompt done: result=%s exception=%s", result, e)
                 results.append(result)
+                if len(results) == 1:
+                    print_with_timestamp(f"Received first prompt (time: {time.time() - t_start} seconds)")
 
             logger.info("all prompts done (%.1fs)", time.time() - t_prompts)
-            print_with_timestamp(f"All prompts done! (time: {time.time() - t_prompts} seconds)")
+            print_with_timestamp(f"All prompts done! (time: {time.time() - t_start} seconds, inference time: {time.time() - t_prompts} seconds)")
 
         # stop the vllm servers
         t0 = time.time()
@@ -175,7 +196,7 @@ def main():
     print_with_timestamp(f"Stopping EnsembleLauncher time: {time.time() - t_start} seconds")
     el.stop()
     logger.info("EnsembleLauncher stopped (%.1fs)", time.time() - t0)
-    print_with_timestamp(f"EnsembleLauncher stopped! time: {time.time() - t0} seconds")
+    print_with_timestamp(f"EnsembleLauncher stopped! time: {time.time() - t_start} seconds")
     logger.info("main done (total %.1fs)", time.time() - t_start)
     print_with_timestamp(f"main done! time: {time.time() - t_start} seconds")
 

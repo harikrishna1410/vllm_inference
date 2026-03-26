@@ -151,6 +151,7 @@ if [ $NGPUS -eq 1 ]; then
       VLLM_DISABLE_SINKS=1 \
       vllm serve ${VLLM_MODEL} \
       --port $PORT \
+      --tensor-parallel-size 1 \
       --trust-remote-code \
       1> $LOG_DIR/${IDX}.vllm.server.log 2>$LOG_DIR/${IDX}.vllm.server.err
 else

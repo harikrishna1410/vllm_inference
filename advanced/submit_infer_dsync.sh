@@ -1,6 +1,6 @@
 #!/bin/bash -l
 #PBS -N el-vllm
-#PBS -l select=2
+#PBS -l select=16
 #PBS -l walltime=01:00:00
 #PBS -q debug-scaling
 #PBS -A datascience
