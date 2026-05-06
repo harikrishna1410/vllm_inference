@@ -5,7 +5,7 @@ import uuid
 from typing import List
 
 from ensemble_launcher import EnsembleLauncher
-from ensemble_launcher.config import LauncherConfig, SystemConfig
+from ensemble_launcher.config import LauncherConfig, PolicyConfig, SystemConfig
 from ensemble_launcher.ensemble import Task
 from ensemble_launcher.helper_functions import get_nodes
 from ensemble_launcher.orchestrator import ClusterClient
@@ -43,8 +43,11 @@ def main():
         master_logs=True,
         return_stdout=True,
         children_scheduler_policy="simple_split_children_policy",
+        policy_config=PolicyConfig(nchildren=len(get_nodes())),
         checkpoint_dir=f"{os.getcwd()}/ckpt_{str(uuid.uuid4())}",
         report_interval=10.0,
+        task_flush_interval=0.5,
+        result_flush_interval=0.5,
     )
 
     # No initial tasks
@@ -123,8 +126,9 @@ def main():
             vllm_start_futures.append(
                 client.submit(
                     f"{os.getcwd()}/start_vllm_server.sh {vllm_idx} {args_dict['port']} {args_dict['ngpus_per_model']} {args_dict['model']} {cache_dir} {args_dict['tmp_dir']}",
-                    ppn=args_dict["ngpus_per_model"],
-                    ngpus_per_process=1,
+                    ppn=1,
+                    nnodes=1,
+                    ngpus_per_process=args_dict["ngpus_per_model"],
                 )
             )
 

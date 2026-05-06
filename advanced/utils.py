@@ -1,9 +1,15 @@
 import argparse
+import asyncio
 import logging
 import os
-import sys
+import random
+import uuid
+from glob import glob
 from logging import Logger
-from typing import List, TypedDict
+from typing import TypedDict
+
+import cloudpickle
+from ensemble_launcher.ensemble.actor import Actor
 
 
 def get_logger(name, log_dir):
@@ -31,9 +37,7 @@ class Args(TypedDict):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="EL inference with vLLM"
-    )
+    parser = argparse.ArgumentParser(description="EL inference with vLLM")
     parser.add_argument(
         "--model",
         type=str,
@@ -124,7 +128,7 @@ def submit_prompt(prompt: str, args_dict: Args, host: str = None):
         del os.environ["HTTP_PROXY"]
         del os.environ["HTTPS_PROXY"]
         os.environ["no_proxy"] = "localhost,127.0.0.1"
-    except Exception as e:
+    except Exception:
         pass
 
     client = OpenAI(
@@ -144,11 +148,10 @@ def submit_prompt(prompt: str, args_dict: Args, host: str = None):
 
 def submit_prompt_to_all(prompt: str, args_dict: Args, logger: Logger = None):
     import os
-    import socket
 
     from openai import OpenAI
 
-    host = socket.gethostname()
+    host = "0.0.0.0"
     local_rank = os.environ.get("PALS_LOCAL_RANKID", 0)
     openai_api_base = f"http://{host}:{int(args_dict['port']) + int(local_rank)}/v1"
 
@@ -161,7 +164,7 @@ def submit_prompt_to_all(prompt: str, args_dict: Args, logger: Logger = None):
         del os.environ["HTTP_PROXY"]
         del os.environ["HTTPS_PROXY"]
         os.environ["no_proxy"] = "localhost,127.0.0.1"
-    except Exception as e:
+    except Exception:
         pass
 
     with OpenAI(
@@ -200,11 +203,207 @@ def wait_for_vllm(args_dict: Args, timeout_seconds=3600, check_interval=10):
     raise RuntimeError(f"vLLM not ready yet after {timeout_seconds}")
 
 
+class VLLMInference(Actor):
+    def __init__(
+        self,
+        name: str,
+        transport: str,
+        model: str,
+        cache_dir: str,
+        tensor_parallel_size: int = 1,
+    ):
+        super().__init__(name, transport)
+        self.model = model
+        self.cache_dir = cache_dir
+        self.tensor_parallel_size = tensor_parallel_size
+        self._llm = None
+        self.logger = None
+
+    def on_start(self):
+        if self.logger is None:
+            self.logger = get_logger(
+                f"vllm-{random.randint(0, 1000)}", f"{os.getcwd()}/script_logs"
+            )
+        if self._llm is None:
+            from vllm import LLM
+
+            snapshots = glob(
+                f"{self.cache_dir}/hub/models--{self.model.replace('/', '--')}/snapshots/*"
+            )
+            self.logger.info(f"model: {snapshots[0]}")
+            self._llm = LLM(
+                model=snapshots[0],
+                tensor_parallel_size=self.tensor_parallel_size,
+                trust_remote_code=True,
+            )
+            self.logger.info("init done!")
+
+    def action(self, prompts="hello", temperature=0.0, max_tokens=1024):
+        from vllm import SamplingParams
+
+        sampling_params = SamplingParams(temperature=temperature, max_tokens=max_tokens)
+
+        if isinstance(prompts, str):
+            prompts = [prompts]
+            single = True
+        else:
+            single = False
+
+        outputs = self._llm.generate(prompts, sampling_params)
+        results = [output.outputs[0].text for output in outputs]
+
+        return results[0] if single else results
+
+
+class LocalActorWrapper:
+    def __init__(self, executable, connection, loop=None):
+        self._callable = executable
+        self._connection = connection
+        self._loop = loop
+        self._stop = None
+
+    async def _invoke(self, *args):
+        result = self._callable()
+        if asyncio.iscoroutine(result):
+            result = await result
+        return result
+
+    async def _action_loop(self):
+        self._stop = asyncio.Event()
+        await self._connection.open()
+        while not self._stop.is_set():
+            frames = await self._connection.recv()
+            args = cloudpickle.loads(frames[-1])
+            if args == "stop":
+                self._stop.set()
+            else:
+                if isinstance(args, tuple):
+                    result = await self._invoke()
+                await self._connection.send(cloudpickle.dumps(result))
+
+        return result
+
+    def __call__(self, *args, **kwds):
+        self._callable._ensure_initialized()
+        return asyncio.run(self._action_loop())
+
+
+class AsyncVLLMInference:
+    def __init__(self, model: str, cache_dir: str, tensor_parallel_size: int = 1):
+        self.model = model
+        self.cache_dir = cache_dir
+        self.tensor_parallel_size = tensor_parallel_size
+        self._engine = None
+        self.logger = None
+
+    async def _ensure_initialized(self):
+        if self._engine is None:
+            from vllm.engine.arg_utils import AsyncEngineArgs
+            from vllm.engine.async_llm_engine import AsyncLLMEngine
+
+            engine_args = AsyncEngineArgs(
+                model=self.model,
+                tensor_parallel_size=self.tensor_parallel_size,
+                download_dir=os.path.join(self.cache_dir, "hub"),
+                trust_remote_code=True,
+            )
+            self._engine = AsyncLLMEngine.from_engine_args(engine_args)
+
+    async def __call__(self, prompts, temperature=0.0, max_tokens=1024):
+        self.logger = get_logger("vllm", f"{os.getcwd()}/script_logs")
+        self.logger.info("Starting init...")
+        try:
+            await self._ensure_initialized()
+        except Exception as e:
+            self.logger.info(f"init failed with error: {e}")
+            return str(e)
+        self.logger.info("Init done")
+        from vllm import SamplingParams
+
+        sampling_params = SamplingParams(temperature=temperature, max_tokens=max_tokens)
+
+        if isinstance(prompts, str):
+            prompts = [prompts]
+            single = True
+        else:
+            single = False
+
+        async def _generate_one(prompt):
+            request_id = str(uuid.uuid4())
+            final_output = None
+            async for output in self._engine.generate(
+                prompt, sampling_params, request_id
+            ):
+                final_output = output
+            return final_output.outputs[0].text
+
+        self.logger.info("generating....")
+        results = await asyncio.gather(*[_generate_one(p) for p in prompts])
+
+        return results[0] if single else list(results)
+
+
+def main(fn, args):
+    fn(*args)
+
+
+def exec_main(llm, args):
+    main(llm, args)
+
+
+def test_asyncio_llm(model):
+    async def _inner():
+        from vllm import LLM
+
+        snapshots = glob(
+            f"/tmp/model_cache/hub/models--{model.replace('/', '--')}/snapshots/*"
+        )
+        llm = LLM(model=snapshots[0], tensor_parallel_size=1)
+        result = llm.generate(["hello"])
+        print(result)
+
+    asyncio.run(_inner())
+
+
 if __name__ == "__main__":
-    args_dict = parse_args()
-    if args_dict["mode"] == "wait":
-        wait_for_vllm(args_dict)
-    elif args_dict["mode"] == "submit":
-        submit_prompt("hi", args_dict)
-    else:
-        raise RuntimeError(f"Unknown mode {args_dict['mode']}")
+    # args_dict = parse_args()
+    # os.environ["ZE_AFFINITY_MASK"] = "0"
+    # result = asyncio.run(
+    #     AsyncVLLMInference(
+    #         model=args_dict["model"],
+    #         cache_dir="/tmp/81968554-d3fa-4b03-8ff9-1ae1a50d9aac",
+    #     )("hello")
+    # )
+
+    # print(result)
+
+    # from concurrent.futures import ProcessPoolExecutor
+
+    # infer = VLLMInference(args_dict["model"], cache_dir="/tmp/model_cache")
+
+    # # asyncio.run(main(infer, ("hello",)))
+
+    # # infer("hello")
+
+    # with ProcessPoolExecutor() as exec:
+    #     future = exec.submit(exec_main, infer, ("hello",))
+
+    # print(future.result())
+
+    ##
+    # test_asyncio_llm(args_dict["model"])
+
+    # from vllm.platforms.xpu import XPUPlatform
+    # import torch
+    from ensemble_launcher import executors
+
+    print(dir(executors))
+
+    # print(zmq.__file__)
+    # print(zmq.zmq_version())
+
+    # snapshots = glob(
+    #     f"/tmp/model_cache/hub/models--{args_dict['model'].replace('/', '--')}/snapshots/*"
+    # )
+    # llm = LLM(model=snapshots[0], tensor_parallel_size=1)
+    # print("success")

@@ -7,7 +7,7 @@
 
 cd $PBS_O_WORKDIR
 
-rm -r logs*
+rm -r logs* script_logs/* ckpt_* ./.actor_ckpt
 
 export ZE_FLAT_DEVICE_HIERARCHY=FLAT
 
@@ -19,6 +19,8 @@ source ~/.vllm_envs/inference/bin/activate
 
 # python3 main_multi_node.py
 
-python3 main_no_el.py --launch "ssh"
+# python3 main_no_el.py --launch "ssh"
 
 python3 main.py
+
+python3 main_offline.py
