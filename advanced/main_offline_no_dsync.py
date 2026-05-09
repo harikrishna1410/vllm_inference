@@ -1,5 +1,4 @@
 import asyncio
-import concurrent.futures
 import os
 import time
 import uuid
@@ -13,7 +12,6 @@ from ensemble_launcher.config import (
     PolicyConfig,
     SystemConfig,
 )
-from ensemble_launcher.ensemble import Task
 from ensemble_launcher.helper_functions import get_nodes
 from ensemble_launcher.orchestrator import ClusterClient
 from utils import VLLMInference, get_logger, parse_args
@@ -44,7 +42,8 @@ async def async_main():
         child_executor_name="async_mpi",
         task_executor_name=["async_processpool", "async_mpi"],
         comm_name="async_zmq",
-        policy_config=PolicyConfig(nlevels=1, nchildren=len(nodes)),
+        children_scheduler_policy="fixed_leafs_children_policy",
+        policy_config=PolicyConfig(nlevels=2, leaf_nodes=len(nodes)),
         mpi_config=MPIConfig(flavor="mpich", cpu_bind_method="none"),
         cluster=True,
         worker_logs=True,
@@ -66,57 +65,8 @@ async def async_main():
     await asyncio.sleep(5.0)
     logger.info("EnsembleLauncher ready (%.1fs)", time.time() - t0)
 
-    # Copy model to node-local storage via dsync
-    model_dir = os.path.join(
-        args_dict["cache_dir"],
-        "hub",
-        f"models--{args_dict['model'].replace('/', '--')}",
-    )
     local_cache = os.path.join("/tmp", "model_cache")
-    copy_dir = os.path.join(
-        local_cache,
-        "hub",
-        f"models--{args_dict['model'].replace('/', '--')}",
-    )
     cache_dir = local_cache
-    logger.info(local_cache)
-
-    with ClusterClient(checkpoint_dir=ckpt_dir) as client:
-        if not os.path.exists(copy_dir):
-            t0 = time.time()
-            logger.info("mkdir on %d nodes", len(nodes))
-            copy_futures = []
-            for node in nodes:
-                future = client.submit(f"mkdir -p {copy_dir}", nnodes=1, ppn=1)
-                copy_futures.append(future)
-
-            concurrent.futures.wait(copy_futures)
-            logger.info("mkdir done (%.1fs)", time.time() - t0)
-
-            t0 = time.time()
-            logger.info(
-                "dsync model to local cache on %d nodes: %s -> %s",
-                len(nodes),
-                model_dir,
-                copy_dir,
-            )
-            copy_futures = []
-            for node in nodes:
-                task = Task(
-                    task_id=str(uuid.uuid4()),
-                    nnodes=1,
-                    ppn=90,
-                    executable=f"dsync {model_dir + '/'} {copy_dir + '/'}",
-                    executor_name="async_mpi",
-                )
-                future = client.submit(task=task)
-                copy_futures.append(future)
-
-            concurrent.futures.wait(copy_futures)
-            logger.info("dsync done (%.1fs)", time.time() - t0)
-
-            if not all(fut.exception() is None for fut in copy_futures):
-                raise RuntimeError("Copying models failed")
 
     actors = []
     actor_tasks = []
@@ -158,7 +108,6 @@ async def async_main():
             chunks[i % len(nodes)].append(prompt)
 
         t_prompts = time.time()
-        logger.info("sending %d prompts across %d actors", len(prompts), len(nodes))
 
         for i, actor in enumerate(actors):
             if not chunks[i]:

@@ -75,7 +75,9 @@ def main():
     )
     cache_dir = local_cache
     vllm_start_futures = []
-    with ClusterClient(checkpoint_dir=launcer_config.checkpoint_dir) as client:
+    with ClusterClient(
+        checkpoint_dir=launcer_config.checkpoint_dir, task_buffer_size=0
+    ) as client:
         if not os.path.exists(copy_dir):
             t0 = time.time()
             logger.info("mkdir on %d nodes", len(get_nodes()))
