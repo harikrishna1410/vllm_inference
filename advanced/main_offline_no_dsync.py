@@ -42,8 +42,7 @@ async def async_main():
         child_executor_name="async_mpi",
         task_executor_name=["async_processpool", "async_mpi"],
         comm_name="async_zmq",
-        children_scheduler_policy="fixed_leafs_children_policy",
-        policy_config=PolicyConfig(nlevels=2, leaf_nodes=len(nodes)),
+        policy_config=PolicyConfig(nlevels=1, nchildren=len(nodes)),
         mpi_config=MPIConfig(flavor="mpich", cpu_bind_method="none"),
         cluster=True,
         worker_logs=True,
@@ -62,7 +61,7 @@ async def async_main():
     t0 = time.time()
     logger.info("starting EnsembleLauncher")
     el.start()
-    await asyncio.sleep(5.0)
+    await asyncio.sleep(10.0)
     logger.info("EnsembleLauncher ready (%.1fs)", time.time() - t0)
 
     local_cache = os.path.join("/tmp", "model_cache")
@@ -93,7 +92,7 @@ async def async_main():
         )
 
     # Submit actors and run inference
-    with ClusterClient(checkpoint_dir=ckpt_dir) as client:
+    with ClusterClient(checkpoint_dir=ckpt_dir, checkpoint_timeout=300) as client:
         t0 = time.time()
         logger.info("submitting %d actor tasks", len(actor_tasks))
         actor_futures = []

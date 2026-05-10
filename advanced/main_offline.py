@@ -81,7 +81,7 @@ async def async_main():
     cache_dir = local_cache
     logger.info(local_cache)
 
-    with ClusterClient(checkpoint_dir=ckpt_dir) as client:
+    with ClusterClient(checkpoint_dir=ckpt_dir, task_buffer_size=0) as client:
         if not os.path.exists(copy_dir):
             t0 = time.time()
             logger.info("mkdir on %d nodes", len(nodes))
@@ -143,7 +143,7 @@ async def async_main():
         )
 
     # Submit actors and run inference
-    with ClusterClient(checkpoint_dir=ckpt_dir) as client:
+    with ClusterClient(checkpoint_dir=ckpt_dir, task_buffer_size=0) as client:
         t0 = time.time()
         logger.info("submitting %d actor tasks", len(actor_tasks))
         actor_futures = []
