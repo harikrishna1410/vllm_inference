@@ -23,10 +23,10 @@ Optional:
 from __future__ import annotations
 
 import argparse
-import pkgutil
 import importlib
 import inspect
 import os
+import pkgutil
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -68,8 +68,8 @@ def main() -> int:
 
     # Import vLLM registry internals
     try:
-        import vllm.model_executor.models.registry as r
         import vllm.model_executor.models as models_pkg
+        import vllm.model_executor.models.registry as r
     except Exception as e:
         print(f"ERROR: failed to import vLLM internals: {e!r}", file=sys.stderr)
         return 1
@@ -105,15 +105,15 @@ def main() -> int:
 
         module_file = getattr(module, "__file__", None)
         if not module_file:
+            print("module_file is None")
             skipped += 1
             continue
 
         try:
             module_bytes = Path(module_file).read_bytes()
-            module_hash = r.safe_hash(
-                module_bytes, usedforsecurity=False
-            ).hexdigest()
-        except Exception:
+            module_hash = r.safe_hash(module_bytes, usedforsecurity=False).hexdigest()
+        except Exception as e:
+            print(f"module_hash failed with Exception {e}")
             skipped += 1
             continue
 
