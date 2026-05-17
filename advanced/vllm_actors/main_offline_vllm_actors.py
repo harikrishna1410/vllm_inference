@@ -4,7 +4,6 @@ import time
 import uuid
 from typing import List
 
-import cloudpickle
 from ensemble_launcher import EnsembleLauncher
 from ensemble_launcher.config import (
     LauncherConfig,
@@ -133,18 +132,11 @@ async def async_main():
         for i, actor in enumerate(actors):
             if not chunks[i]:
                 continue
-            payload = cloudpickle.dumps((chunks[i],))
             logger.info(f"Waiting to create handle for actor-{i}")
-            handle = VLLMInference.create_handle(
-                ckpt_dir=actor.ckpt_dir,
-                name=actor.name,
-                transport_classes=actor.transport_classes,
-                secret=actor.secret,
-                timeout=600.0,
-            )
+            handle = actor.create_handle(timeout=600)
             if handle is not None:
                 await handle.open()
-                await handle.send(payload)
+                await handle.send(("generate", chunks[i]))
                 logger.info(f"Submitted prompts to actor-{i}")
                 handles.append(handle)
             else:
@@ -159,24 +151,22 @@ async def async_main():
         all_results = []
         done = set()
         while len(all_results) < len(prompts) and len(done) < len(actor_futures):
-            for i, server in enumerate(handles):
+            for i, handle in enumerate(handles):
                 if i in done:
                     continue
-                ##
                 if not chunks[i]:
                     continue
                 try:
-                    frames = await asyncio.wait_for(server.recv(), timeout=10.0)
-                    results = cloudpickle.loads(frames[1])
+                    results = await asyncio.wait_for(handle.recv(), timeout=10.0)
                     logger.info(f"actor {i} returned results {results}")
                     all_results.extend(results)
                     done.add(i)
                 except Exception as e:
-                    logger.info(f"Waiting for resuls from actor-{i} timed out: {e}")
+                    logger.info(f"Waiting for results from actor-{i} timed out: {e}")
 
                 if actor_futures[i].done() and actor_futures[i].exception() is not None:
                     logger.info(
-                        f"actor {i} died with with: {actor_futures[i].exception()}"
+                        f"actor {i} died with: {actor_futures[i].exception()}"
                     )
                     done.add(i)
 
@@ -190,8 +180,7 @@ async def async_main():
         t0 = time.time()
         logger.info("stopping actors")
         for handle in handles:
-            stop_payload = cloudpickle.dumps("stop")
-            await handle.send(stop_payload)
+            await handle.stop()
 
         for future in actor_futures:
             try:
