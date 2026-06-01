@@ -6,10 +6,11 @@ import random
 import uuid
 from glob import glob
 from logging import Logger
-from typing import TypedDict
+from typing import List, TypedDict
 
 import cloudpickle
 from ensemble_launcher.ensemble.actor import Actor
+from ensemble_launcher.inference.utils import build_model_cache
 
 
 def get_logger(name, log_dir):
@@ -105,6 +106,11 @@ def parse_args():
         type=int,
         default=104,
         help="Number of CPUs per node (default: 104 as on Aurora)",
+    )
+    parser.add_argument(
+        "--pre-build-vllm-cache",
+        type=int,
+        default=0,
     )
 
     args = parser.parse_args()
@@ -363,6 +369,31 @@ def test_asyncio_llm(model):
         print(result)
 
     asyncio.run(_inner())
+
+
+def call_llm(model: str, prompts: List):
+
+    os.environ["VLLM_CACHE_ROOT"] = f"/tmp/vllm_cache_{uuid.uuid4().hex[:6]}"
+    os.makedirs(os.environ["VLLM_CACHE_ROOT"])
+    os.environ["MASTER_PORT"] = str(random.randint(10000, 99999))
+    build_model_cache()
+
+    from vllm import LLM, SamplingParams
+
+    snapshots = glob(
+        f"/tmp/model_cache/hub/models--{model.replace('/', '--')}/snapshots/*"
+    )
+
+    llm = LLM(
+        model=snapshots[0],
+        tensor_parallel_size=1,
+        trust_remote_code=True,
+    )
+
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=1024)
+    outputs = llm.generate(prompts, sampling_params)
+
+    return outputs
 
 
 if __name__ == "__main__":
