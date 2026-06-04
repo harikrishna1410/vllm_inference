@@ -91,7 +91,11 @@ async def _async_worker_process(
     for i in actor_indices:
         actor_id = f"vllm-actor-{i}"
         server, client = transport.create_child_pipe(
-            server_id, server_secret, actor_id, server_secret
+            server_id,
+            server_secret,
+            actor_id,
+            server_secret,
+            req_res=True,
         )
 
         actor = PrivateVLLMInference(
@@ -102,6 +106,9 @@ async def _async_worker_process(
             client_conn=client,
             use_cached_modelinfo=pre_build_vllm_cache,
             model_info_cache=node_local_vllm_cache if pre_build_vllm_cache else None,
+            send_timeout=args_dict["send_timeout"],
+            send_retries=args_dict["send_retries"],
+            llm_kwargs={"enforce_eager": True},
         )
         actors.append(actor)
         actor_tasks.append(
@@ -119,7 +126,11 @@ async def _async_worker_process(
         actor_futures = [client_cluster.submit(task) for task in actor_tasks]
         worker_logger.info(f"Worker {worker_id} submitted {len(actor_tasks)} tasks.")
 
-        handle: PrivateActorHandle = PrivateVLLMInference.create_handle(server)
+        handle: PrivateActorHandle = PrivateVLLMInference.create_handle(
+            server,
+            send_timeout=args_dict["send_timeout"],
+            send_retries=args_dict["send_retries"],
+        )
         await handle.open()
 
         worker_logger.info(f"Worker {worker_id} waiting for actors to be ready...")
@@ -299,7 +310,7 @@ async def async_main():
     logger.info("EnsembleLauncher ready (%.1fs)", time.time() - t0)
 
     n_actors = 12 * len(nodes) // args_dict["ngpus_per_model"]
-    ACTORS_PER_PROCESS = 32 * 12
+    ACTORS_PER_PROCESS = args_dict["actors_per_process"]
 
     actor_chunks = [
         list(range(i, min(i + ACTORS_PER_PROCESS, n_actors)))

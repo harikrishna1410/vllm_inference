@@ -6,7 +6,7 @@ import random
 import uuid
 from glob import glob
 from logging import Logger
-from typing import List, TypedDict
+from typing import Any, Dict, List, TypedDict
 
 import cloudpickle
 from ensemble_launcher.ensemble.actor import Actor
@@ -111,6 +111,21 @@ def parse_args():
         "--pre-build-vllm-cache",
         type=int,
         default=0,
+    )
+    parser.add_argument(
+        "--send-timeout",
+        type=float,
+        default=5.0,
+    )
+    parser.add_argument(
+        "--send-retries",
+        type=int,
+        default=3,
+    )
+    parser.add_argument(
+        "--actors-per-process",
+        type=int,
+        default=384,
     )
 
     args = parser.parse_args()
@@ -371,7 +386,17 @@ def test_asyncio_llm(model):
     asyncio.run(_inner())
 
 
-def call_llm(model: str, prompts: List):
+def call_llm(
+    model: str,
+    prompts: List,
+    tensor_parallel_size: int = 1,
+    llm_kwargs: Dict[str, Any] = {
+        "max_model_len": 2048,
+        "enforce_eager": True,
+        "trust_remote_code": True,
+    },
+    sampling_kwargs: Dict = {"temperature": 0.0, "max_tokens": 1024},
+):
 
     os.environ["VLLM_CACHE_ROOT"] = f"/tmp/vllm_cache_{uuid.uuid4().hex[:6]}"
     os.makedirs(os.environ["VLLM_CACHE_ROOT"])
@@ -385,13 +410,11 @@ def call_llm(model: str, prompts: List):
     )
 
     llm = LLM(
-        model=snapshots[0],
-        tensor_parallel_size=1,
-        trust_remote_code=True,
+        model=snapshots[0], tensor_parallel_size=tensor_parallel_size, **llm_kwargs
     )
 
-    sampling_params = SamplingParams(temperature=0.0, max_tokens=1024)
-    outputs = llm.generate(prompts, sampling_params)
+    sampling_params = SamplingParams(**sampling_kwargs)
+    outputs = llm.generate(prompts, sampling_params=sampling_params)
 
     return outputs
 
