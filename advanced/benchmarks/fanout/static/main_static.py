@@ -17,8 +17,9 @@ from ensemble_launcher.config import (
 from ensemble_launcher.ensemble import Task
 from ensemble_launcher.helper_functions import get_nodes
 from ensemble_launcher.inference import PrivateVLLMInference, copy_model
+from ensemble_launcher.inference.utils import call_llm
 from ensemble_launcher.orchestrator import ClusterClient
-from utils import call_llm, get_logger, parse_args
+from utils import get_logger, parse_args
 
 logger = get_logger("main_offline", log_dir=f"{os.getcwd()}/script_logs")
 
@@ -124,13 +125,13 @@ async def async_main():
         ),
         mpi_config=MPIConfig(flavor="mpich", cpu_bind_method="none"),
         cluster=True,
-        worker_logs=True,
+        worker_logs=False,
         master_logs=True,
         return_stdout=True,
         checkpoint_dir=ckpt_dir,
         report_interval=10.0,
-        task_flush_interval=0.5,
-        result_flush_interval=0.5,
+        heartbeat_dead_threshold=120,
+        heartbeat_interval=5.0,
     )
 
     el = EnsembleLauncher(
@@ -170,14 +171,12 @@ async def async_main():
     with ClusterClient(checkpoint_dir=ckpt_dir, checkpoint_timeout=300) as client:
         t0 = time.time()
         llm_futures = []
-        for task in llm_tasks:
-            future = client.submit(task)
-            llm_futures.append(future)
+        llm_futures = client.submit_batch(tasks=llm_tasks)
 
         logger.info("submitted %d llm tasks", n_tasks)
 
         start = time.perf_counter()
-        done, pending = concurrent.futures.wait(llm_futures, timeout=1800)
+        done, pending = concurrent.futures.wait(llm_futures, timeout=1200)
 
         if len(done) == n_tasks:
             logger.info(f"all prompts done ({time.perf_counter() - start: .1f})")
@@ -190,7 +189,7 @@ async def async_main():
             if f.exception() is not None:
                 logger.warning(f"Task {i} failed with exception: {f.exception()}")
             else:
-                logger.info(f"Result {i}: {f.result()}")
+                logger.debug(f"Result {i}: {f.result()}")
 
     t0 = time.time()
     logger.info("stopping EnsembleLauncher")

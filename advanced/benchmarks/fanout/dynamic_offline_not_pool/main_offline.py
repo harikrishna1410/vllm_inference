@@ -1,8 +1,7 @@
-"""Distributed vLLM inference benchmark using ActorPool.
+"""Distributed vLLM inference benchmark using Private Actors.
 
-Measures fan-out throughput across a multi-node cluster. Each ActorPool
-manages a group of PrivateVLLMInference actors; multiple pools run in
-parallel to scale beyond what a single handle can coordinate.
+Measures fan-out throughput across a multi-node cluster. A single
+handle is used to communicate with all the actors
 
 Flow:
   1. Distribute the model to all nodes (dsync + MPI scatter).
@@ -28,7 +27,6 @@ from typing import List
 from ensemble_launcher import EnsembleLauncher
 from ensemble_launcher.comm import transport_registry
 from ensemble_launcher.config import aurora_config
-from ensemble_launcher.ensemble import ActorPool
 from ensemble_launcher.helper_functions import get_nodes
 from ensemble_launcher.inference import (
     PrivateVLLMInference,
@@ -92,17 +90,11 @@ async def async_main():
 
     # Step 3: Create ActorPools and submit them to the cluster
     n_actors = 12 * len(nodes) // args_dict["ngpus_per_model"]
-    ACTORS_PER_PROCESS = args_dict["actors_per_process"]
-
-    actor_chunks = [
-        list(range(i, min(i + ACTORS_PER_PROCESS, n_actors)))
-        for i in range(0, n_actors, ACTORS_PER_PROCESS)
-    ]
 
     transport = transport_registry.get("zmq")["transport"]()
     server_id = "global_server"
     server_secret = secrets.token_hex(16)
-    pool_ids = []
+    actor_ids = []
     actor_kwargs = {
         "model": args_dict["model"],
         "cache_dir": local_cache,
@@ -122,83 +114,67 @@ async def async_main():
         with ClusterClient(
             checkpoint_dir=ckpt_dir, checkpoint_timeout=300
         ) as cluster_client:
-            for i, chunk in enumerate(actor_chunks):
-                pool_name = f"pool-{i}"
-                server, pool_client = transport.create_child_pipe(
+            for idx in range(n_actors):
+                actor_name = f"actor-{idx}"
+                server, actor_client = transport.create_child_pipe(
                     server_id,
                     server_secret,
-                    pool_name,
+                    actor_name,
                     server_secret,
                     req_res=True,
                 )
-
-                actor_pool = ActorPool(
-                    name=pool_name,
-                    client_conn=pool_client,
-                    actor_class=PrivateVLLMInference,
-                    n_actors=len(chunk),
-                    actor_kwargs=actor_kwargs,
-                    task_kwargs=task_kwargs,
-                    checkpoint_dir=ckpt_dir,
-                    req_res=True,
-                    child_send_timeout=args_dict["send_timeout"],
-                    child_send_retries=args_dict["send_retries"],
-                    send_timeout=args_dict["send_timeout"],
-                    send_retries=args_dict["send_retries"],
-                    child_ready_timeout=600,
+                actor = PrivateVLLMInference(
+                    name=actor_name, client_conn=actor_client, **actor_kwargs
                 )
-                pool_task = actor_pool.create_task(task_id=pool_name, nnodes=1, ppn=1)
-                cluster_client.submit(pool_task)
-                pool_ids.append(f"{pool_name}:{server_secret}")
+                actor_task = actor.create_task(task_id=actor_name, **task_kwargs)
+                cluster_client.submit(actor_task)
+                actor_ids.append(f"{actor_name}:{server_secret}")
 
-            pool_handle = ActorPool.create_handle(
+            actor_handle = PrivateVLLMInference.create_handle(
                 server,
                 send_timeout=args_dict["send_timeout"],
                 send_retries=args_dict["send_retries"],
             )
-            await pool_handle.open()
-            logger.info(f"Waiting for {len(pool_ids)} pools to be ready...")
-            await pool_handle.wait_for_ready(expected=len(pool_ids), timeout=660)
+            await actor_handle.open()
+            await actor_handle.wait_for_ready(expected=len(actor_ids), timeout=600)
 
             # Step 4: Warmup — short generate on every actor via each pool
-            async def _run_pool(pool_id, msg):
-                _, results = await pool_handle.invoke_all(msg, actor_id=pool_id)
-                logger.info(f"Pool {pool_id.split(':')[0]} completed")
+            async def _run_actor(actor_id, prompt):
+                _, results = await actor_handle.generate(prompt, actor_id=actor_id)
+                logger.info(f"Actor {actor_id.split(':')[0]} completed")
                 return results
 
-            logger.info(f"Waiting for {len(pool_ids)} pools to warm up...")
-            inference_msg = ("generate", ("hi",), None)
-            tasks = [
-                asyncio.create_task(_run_pool(pid, inference_msg)) for pid in pool_ids
-            ]
+            logger.info(f"Waiting for {len(actor_ids)} pools to warm up...")
+            tasks = [asyncio.create_task(_run_actor(pid, "hi")) for pid in actor_ids]
             try:
                 results = await asyncio.wait_for(
-                    asyncio.gather(*tasks, return_exceptions=True), timeout=1200
+                    asyncio.gather(*tasks, return_exceptions=True), timeout=600
                 )
             except asyncio.TimeoutError:
                 logger.error("Warmup timed out")
-                raise TimeoutError
+                raise asyncio.TimeoutError
 
             # Step 5: Inference — invoke_all on every pool concurrently, measure throughput
             logger.info("All pools ready. Starting inference...")
             t_inference_start = time.perf_counter()
 
-            inference_msg = ("generate", ("hi, introduce yourself",), None)
             tasks = [
-                asyncio.create_task(_run_pool(pid, inference_msg)) for pid in pool_ids
+                asyncio.create_task(_run_actor(pid, "hi, introduce yourself"))
+                for pid in actor_ids
             ]
             try:
                 results = await asyncio.wait_for(
-                    asyncio.gather(*tasks, return_exceptions=True), timeout=100
+                    asyncio.gather(*tasks, return_exceptions=True), timeout=600
                 )
                 for rid, result in enumerate(results):
                     logger.debug(f"Result {rid}: {result}")
             except asyncio.TimeoutError:
                 logger.error("Inference timed out")
+                raise asyncio.TimeoutError
 
             # Step 6: Stop pools and EnsembleLauncher
-            await pool_handle.stop()
-            await pool_handle.close()
+            await actor_handle.stop()
+            await actor_handle.close()
 
         inference_duration = time.perf_counter() - t_inference_start
         logger.info("== INFERENCE COMPLETED ==")
